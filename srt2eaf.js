@@ -314,7 +314,89 @@ class MultiSRTToELANConverter {
             .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); // Remove control characters
     }
 
-    // Main conversion method with comprehensive error handling
+    // NEW METHOD: Convert each SRT to separate EAF files
+    async convertSeparate(directory = './input', options = {}) {
+        const { outputDir = './output', mediaFile = null, author = null } = options;
+        
+        try {
+            const srtFiles = this.findSRTFiles(directory);
+
+            if (srtFiles.length === 0) {
+                throw new Error('No SRT files found in the specified directory');
+            }
+
+            // Ensure output directory exists
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
+            }
+
+            const results = [];
+            const failedFiles = [];
+
+            console.log(`Found ${srtFiles.length} SRT file(s). Creating separate EAF files...\n`);
+
+            for (const srtFile of srtFiles) {
+                try {
+                    // Reset state for each file
+                    this.allTimeSlots.clear();
+                    this.timeSlotId = 1;
+                    this.annotationId = 1;
+                    this.tiers = [];
+
+                    const tier = this.processSRTFile(srtFile);
+                    
+                    if (!tier) {
+                        failedFiles.push(srtFile);
+                        continue;
+                    }
+
+                    const elanXML = this.generateELAN([tier], { mediaFile, author });
+
+                    // Create output filename
+                    const baseName = path.basename(srtFile, '.srt');
+                    const outputPath = path.join(outputDir, `${baseName}.eaf`);
+
+                    fs.writeFileSync(outputPath, elanXML, 'utf8');
+
+                    console.log(`✓ Created: ${path.basename(outputPath)} (${tier.subtitles.length} annotations)`);
+
+                    results.push({
+                        srtFile: path.basename(srtFile),
+                        eafFile: path.basename(outputPath),
+                        annotations: tier.subtitles.length,
+                        outputPath: outputPath
+                    });
+
+                } catch (error) {
+                    console.error(`✗ Failed: ${path.basename(srtFile)} - ${error.message}`);
+                    failedFiles.push(srtFile);
+                }
+            }
+
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`Successfully converted: ${results.length}/${srtFiles.length} files`);
+            if (failedFiles.length > 0) {
+                console.log(`Failed: ${failedFiles.length} file(s)`);
+            }
+            console.log(`Output directory: ${outputDir}`);
+            console.log(`${'='.repeat(60)}\n`);
+
+            return {
+                totalFiles: srtFiles.length,
+                successCount: results.length,
+                failedCount: failedFiles.length,
+                outputDir: outputDir,
+                results: results,
+                failedFiles: failedFiles.map(f => path.basename(f))
+            };
+
+        } catch (error) {
+            console.error(`Conversion failed: ${error.message}`);
+            throw error;
+        }
+    }
+
+    // Main conversion method with comprehensive error handling (COMBINED MODE)
     async convertMultiple(directory = './input', options = {}) {
         const { outputPath = null, mediaFile = null, author = null } = options;
         
@@ -444,24 +526,33 @@ function main() {
     const args = process.argv.slice(2);
 
     if (args.includes('--help') || args.includes('-h')) {
-        console.log('Multi SRT to ELAN Converter v2.0');
+        console.log('Multi SRT to ELAN Converter v2.1');
         console.log('Converts SRT subtitle files to ELAN annotation format\n');
-        console.log('Usage: node srt-to-elan.js [options]\n');
+        console.log('Usage: node srt-to-elan-separate.js [options]\n');
         console.log('Options:');
         console.log('  --dir=PATH          Directory to search for SRT files (default: ./input)');
-        console.log('  --output=FILE       Output ELAN file path (default: ./output/auto-generated)');
+        console.log('  --output-dir=PATH   Output directory for EAF files (default: ./output)');
+        console.log('  --output=FILE       Single output ELAN file path (combined mode)');
         console.log('  --media=FILE        Media file reference for ELAN project');
         console.log('  --author=NAME       Author name for ELAN document');
         console.log('  --single=FILE       Convert single SRT file instead of directory');
+        console.log('  --separate          Create separate EAF file for each SRT (DEFAULT)');
+        console.log('  --combined          Create one EAF with all SRTs as tiers');
         console.log('  --encoding=ENC      File encoding (default: utf8)');
         console.log('  --preserve-format   Keep HTML/formatting tags in text');
         console.log('  --strict            Enable strict validation (shows warnings)');
         console.log('  --help, -h          Show this help message\n');
         console.log('Examples:');
-        console.log('  node srt-to-elan.js');
-        console.log('  node srt-to-elan.js --dir=./subtitles --output=project.eaf');
-        console.log('  node srt-to-elan.js --single=movie.srt --media=movie.mp4');
-        console.log('  node srt-to-elan.js --author="John Doe" --strict\n');
+        console.log('  # Create separate EAF files (default):');
+        console.log('  node srt-to-elan-separate.js');
+        console.log('  node srt-to-elan-separate.js --dir=./subtitles --output-dir=./eaf-files');
+        console.log('');
+        console.log('  # Create one combined EAF file:');
+        console.log('  node srt-to-elan-separate.js --combined');
+        console.log('  node srt-to-elan-separate.js --combined --dir=./subtitles --output=project.eaf');
+        console.log('');
+        console.log('  # Convert single file:');
+        console.log('  node srt-to-elan-separate.js --single=movie.srt --media=movie.mp4\n');
         return;
     }
 
@@ -469,12 +560,15 @@ function main() {
     const config = {
         directory: './input',
         outputFile: null,
+        outputDir: './output',
         mediaFile: null,
         singleFile: null,
         author: null,
         encoding: 'utf8',
         preserveFormatting: false,
-        strictValidation: false
+        strictValidation: false,
+        separateMode: false,
+        combinedMode: false
     };
 
     for (const arg of args) {
@@ -482,6 +576,8 @@ function main() {
             config.directory = arg.substring(6);
         } else if (arg.startsWith('--output=')) {
             config.outputFile = arg.substring(9);
+        } else if (arg.startsWith('--output-dir=')) {
+            config.outputDir = arg.substring(13);
         } else if (arg.startsWith('--media=')) {
             config.mediaFile = arg.substring(8);
         } else if (arg.startsWith('--single=')) {
@@ -494,10 +590,19 @@ function main() {
             config.preserveFormatting = true;
         } else if (arg === '--strict') {
             config.strictValidation = true;
+        } else if (arg === '--separate') {
+            config.separateMode = true;
+        } else if (arg === '--combined') {
+            config.combinedMode = true;
         } else {
             console.error(`Unknown argument: ${arg}`);
             process.exit(1);
         }
+    }
+
+    // Default to separate mode if neither specified
+    if (!config.separateMode && !config.combinedMode) {
+        config.separateMode = true;
     }
 
     // Validate paths
@@ -524,7 +629,15 @@ function main() {
                 mediaFile: config.mediaFile,
                 author: config.author
             });
+        } else if (config.separateMode) {
+            // NEW: Separate mode - one EAF per SRT
+            converter.convertSeparate(config.directory, {
+                outputDir: config.outputDir,
+                mediaFile: config.mediaFile,
+                author: config.author
+            });
         } else {
+            // Default: Combined mode - one EAF with multiple tiers
             converter.convertMultiple(config.directory, {
                 outputPath: config.outputFile,
                 mediaFile: config.mediaFile,
